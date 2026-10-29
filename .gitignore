@@ -1,0 +1,21 @@
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# never commit settings, they have the api key in them
+*.env
+nowplaying.env
+state.json
+docs/screenshots/.state.json
+
+# os junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# editors
+.vscode/
+.idea/
+*.swp

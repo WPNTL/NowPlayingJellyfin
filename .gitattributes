@@ -1,0 +1,10 @@
+# everything that's text gets LF, even when cloned/edited on windows.
+# a single \r in a shebang breaks the scripts on the pi ("python3\r: not found")
+* text=auto eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+display text eol=lf
+*.service text eol=lf
+
+*.png binary
+*.gif binary

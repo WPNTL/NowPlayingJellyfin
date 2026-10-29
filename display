@@ -2,18 +2,23 @@
 """
 display - lil cli to boss the now playing lcd around
 
-  display              what's on rn
-  display list         list themes (w/ color swatches if ur terminal does truecolor)
-  display <theme>      switch it, e.g. `display miami`. case doesn't matter
-  display lang <xx>    on-screen text language: en, pt
-  display restart      kick the service (do this after updating files)
-  display logs         last 30 lines of the service log
-  display help         this
+  display                  show current settings
+  display list             list themes (w/ color swatches if ur terminal does truecolor)
+  display <theme>          switch it, e.g. `display miami`. case doesn't matter
+  display lang <en|pt>     on-screen text language
+  display sleep <time>     how long w/ nothing playing before the monster gets drowsy
+                           e.g. 30m, 2h, 1h30m, 4h (default), off = never
+  display rotate <deg>     0, 90, 180 or 270. 180 if the image is upside down
+  display restart          kick the service (do this after updating files)
+  display logs             last 30 lines of the service log
+  display help             this
 
-changing theme/lang needs root (sudo), the state file lives in /var/lib.
+TAB completes all of it (open a new terminal after installing).
+changing stuff needs root (sudo), the state file lives in /var/lib.
 the daemon checks it every ~1s, so changes show up basically instantly.
 """
 import os
+import re
 import subprocess
 import sys
 
@@ -22,7 +27,11 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from themes import THEMES, DEFAULT_THEME, STATE_PATH, hx, load_state, save_state, resolve  # noqa: E402
 
 SERVICE = "nowplaying"
+ENV_FILE = "/etc/nowplaying/nowplaying.env"
 LANGS = {"en": "english", "pt": "portugues"}
+ROTATIONS = ("0", "90", "180", "270")
+SLEEP_PRESETS = ("30m", "1h", "2h", "4h", "8h", "12h", "off")
+COMMANDS = ("list", "lang", "sleep", "rotate", "restart", "logs", "help")
 COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
 
 
@@ -36,12 +45,70 @@ def swatch(hexes):
     return out + "\033[0m"
 
 
+def env_default(key, fallback):
+    """what the service uses when `display` never set it: its env file, else the built-in
+    default. the env file is root-only, so w/o sudo we just can't peek and assume default"""
+    if key in os.environ:
+        return os.environ[key]
+    try:
+        with open(ENV_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith(key + "="):
+                    return line.split("=", 1)[1].strip().strip('"\'')
+    except OSError:
+        pass
+    return fallback
+
+
+# ---------------------------------------------------------------- sleep time --
+_DUR = re.compile(r"^(?:(\d+(?:\.\d+)?)h)?(?:(\d+)m(?:in)?)?$")
+
+
+def parse_sleep(s):
+    """'4h' '90m' '1h30m' '1.5h' '45' (bare number = minutes) 'off' -> minutes, 0 = never.
+    None if it makes no sense"""
+    s = s.strip().lower().replace(" ", "")
+    if s in ("off", "never", "0"):
+        return 0
+    if s.isdigit():
+        return int(s)
+    m = _DUR.match(s)
+    if not m or not (m.group(1) or m.group(2)):
+        return None
+    mins = float(m.group(1) or 0) * 60 + int(m.group(2) or 0)
+    return int(round(mins))
+
+
+def fmt_sleep(mins):
+    mins = int(round(float(mins)))
+    if mins <= 0:
+        return "off"
+    h, m = divmod(mins, 60)
+    return (f"{h}h" if h else "") + (f"{m}m" if m or not h else "")
+
+
+def current_sleep():
+    st = load_state()
+    if "sleep_min" in st:
+        return fmt_sleep(st["sleep_min"])
+    try:
+        return fmt_sleep(env_default("NP_SLEEP_MIN", "240"))
+    except ValueError:
+        return "4h"
+
+
+def current_rotate():
+    return str(load_state().get("rotate", env_default("NP_ROTATE", "0")))
+
+
+# ---------------------------------------------------------------- the rest --
 def current():
     return resolve(load_state().get("theme", os.environ.get("NP_THEME", DEFAULT_THEME)))
 
 
 def current_lang():
-    return load_state().get("lang") or os.environ.get("NP_LANG", "en")
+    return load_state().get("lang") or env_default("NP_LANG", "en")
 
 
 def service_up():
@@ -51,6 +118,17 @@ def service_up():
         return r.returncode == 0
     except FileNotFoundError:
         return True   # no systemd?? whatever, don't nag
+
+
+def show_all():
+    cur = current()
+    th = THEMES.get(cur, THEMES[DEFAULT_THEME])
+    shown = "???" if th.get("hidden") else cur
+    print(f"theme   {shown}  {swatch(th['swatch'])}")
+    print(f"lang    {current_lang()}")
+    print(f"sleep   {current_sleep()}    (drowsy after this long w/ nothing playing)")
+    print(f"rotate  {current_rotate()}")
+    # print(f"state   {STATE_PATH}")   # nobody cares lol
 
 
 def list_themes():
@@ -93,6 +171,8 @@ def set_theme(name):
 
 def set_lang(args):
     if len(args) < 2 or args[1] not in LANGS:
+        if len(args) >= 2:
+            print(f"'{args[1]}' isn't a language i know (yet). PRs welcome!")
         opts = ", ".join(f"{k} ({v})" for k, v in LANGS.items())
         print(f"lang: {current_lang()}   options: {opts}")
         print("usage: sudo display lang pt")
@@ -103,14 +183,60 @@ def set_lang(args):
     print(f"lang -> {args[1]}")
 
 
-def main():
-    args = [a.lower() for a in sys.argv[1:]]
+def set_sleep(args):
+    if len(args) < 2:
+        print(f"sleep: {current_sleep()}")
+        print("usage: sudo display sleep 4h     (also 30m, 1h30m, 90 = minutes, off = never)")
+        return
+    mins = parse_sleep(args[1])
+    if mins is None:
+        print(f"didn't get '{args[1]}' :/  try 30m, 2h, 1h30m or off")
+        sys.exit(1)
+    if mins > 7 * 24 * 60:
+        print("more than a week? just use `display sleep off` lol")
+        sys.exit(1)
+    st = load_state()
+    st["sleep_min"] = mins
+    save_state(st)
+    if mins:
+        print(f"sleep -> {fmt_sleep(mins)}. it'll get drowsy after {fmt_sleep(mins)} w/ nothing playing")
+    else:
+        print("sleep -> off. it'll stay wide awake forever. respect")
 
+
+def set_rotate(args):
+    if len(args) < 2 or args[1] not in ROTATIONS:
+        if len(args) >= 2:
+            print(f"can't do {args[1]}, only right angles")
+        print(f"rotate: {current_rotate()}   options: {', '.join(ROTATIONS)}")
+        print("usage: sudo display rotate 180")
+        return
+    st = load_state()
+    st["rotate"] = int(args[1])
+    save_state(st)
+    print(f"rotate -> {args[1]}")
+
+
+def complete(words):
+    """for tab completion. `display __complete <words typed so far>` prints what could come
+    next, the bash completion script calls this. asking the cli itself means custom themes
+    tab-complete too, no list to keep in sync"""
+    if not words:
+        return list(COMMANDS) + [n for n, th in THEMES.items() if not th.get("hidden")]
+    if len(words) == 1:
+        return {"lang": list(LANGS), "sleep": list(SLEEP_PRESETS),
+                "rotate": list(ROTATIONS)}.get(words[0].lower(), [])
+    return []
+
+
+def main():
+    if sys.argv[1:2] == ["__complete"]:   # internal, see complete()
+        print(" ".join(complete(sys.argv[2:])))
+        return
+
+    args = [a.lower() for a in sys.argv[1:]]
     if not args:
-        cur = current()
-        th = THEMES.get(cur, THEMES[DEFAULT_THEME])
-        shown = "???" if th.get("hidden") else cur
-        print(f"theme: {shown}  {swatch(th['swatch'])}   lang: {current_lang()}")
+        show_all()
         if not service_up():
             print(f"heads up: {SERVICE} isn't running -> sudo systemctl start {SERVICE}")
         return
@@ -136,9 +262,15 @@ def main():
         if cmd == "lang":
             set_lang(args)
             return
+        if cmd == "sleep":
+            set_sleep(args)
+            return
+        if cmd in ("rotate", "rotation"):
+            set_rotate(args)
+            return
         cmd = resolve(cmd)   # old names still work, quietly
         if cmd not in THEMES:
-            print(f"no theme called '{cmd}' :/  try `display list`")
+            print(f"no theme or command called '{cmd}' :/  try `display help`")
             sys.exit(1)
         set_theme(cmd)
     except PermissionError:

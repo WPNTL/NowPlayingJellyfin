@@ -5,7 +5,7 @@
 **A tiny pixel-art companion for your Jellyfin server.**
 
 It shows what's playing on a 3.5" Raspberry Pi screen, and when nothing is,
-a little monster hangs out, makes faces, and eventually falls asleep.
+a little monster hangs out, makes faces, and eventually gets drowsy.
 
 <img src="docs/screenshots/hero.gif" width="480" alt="The idle monster cycling through expressions">
 
@@ -27,9 +27,12 @@ a little monster hangs out, makes faces, and eventually falls asleep.
   - it gets sad when a movie ends,
   - it gets dizzy if Jellyfin goes offline,
   - it gets sleepy late at night,
-  - it falls asleep after a while.
+  - after 4 hours with nothing playing it gets drowsy: half-closed eyes, nodding off and jolting
+    back awake. You choose how long with `sudo display sleep`, or turn it off.
 - **10 themes, 6 of them animated**: a synthwave road, a fish tank, a haunted graveyard, a snowy Christmas night, a rainy cyberpunk city, a retro 90s desktop… and one hidden one.
-- **Switch themes from the terminal**: `sudo display miami` changes the screen in about a second, no restart needed.
+- **Control everything from the terminal**: `sudo display miami` switches the theme in about a second,
+  and the language, sleep timer and screen rotation work the same way. No restart, no config files,
+  and **TAB autocompletes** every command.
 - **English and Portuguese** on-screen text: `sudo display lang pt`.
 - **One-command install**, which also sets up the screen driver for you.
 - **Lightweight and safe**: pure Python (Pillow + numpy), drawing straight to the framebuffer. No desktop, no X, no pygame. It runs as an unprivileged, sandboxed service and uses a few % of a Pi 3's CPU.
@@ -139,8 +142,8 @@ Play something in Jellyfin (TV, phone, browser…). Within 2 seconds the screen 
 <details>
 <summary><b>What exactly does the installer do?</b></summary>
 
-1. Installs `python3`, `python3-pil` and `python3-numpy` with `apt`.
-2. Copies the app to `/opt/nowplaying` and creates the `display` command.
+1. Installs `python3`, `python3-pil`, `python3-numpy` and `bash-completion` with `apt`.
+2. Copies the app to `/opt/nowplaying` and creates the `display` command, with TAB completion.
 3. Adds the screen driver to `/boot/firmware/config.txt` (or `/boot/config.txt`). It **backs the file up first**, and the lines it adds are wrapped in `# >>> nowplaying lcd >>>` markers so they can be removed cleanly. It skips this step if your screen already works.
 4. Finds your Jellyfin server and **tests your API key before saving it**. It saves the settings to `/etc/nowplaying/nowplaying.env` with **root-only** permissions.
 5. Creates a locked-down `nowplaying` system user and a sandboxed systemd service.
@@ -172,13 +175,21 @@ Everything goes through the `display` command:
 
 | Command | What it does |
 |---|---|
-| `display` | Shows the current theme and language |
+| `display` | Shows the current settings (theme, language, sleep timer, rotation) |
 | `display list` | Lists the themes, with color swatches |
 | `sudo display <theme>` | Switches the theme, e.g. `sudo display cyberpunk`. Takes about 1 second. |
 | `sudo display lang en` / `pt` | Switches the on-screen language |
+| `sudo display sleep <time>` | How long with nothing playing before the monster gets drowsy. Default `4h`. Examples: `30m`, `2h`, `1h30m`, `off` (never). |
+| `sudo display rotate <deg>` | Rotates the image: `0`, `90`, `180` or `270`. Use `180` if it's upside down. |
 | `sudo display restart` | Restarts the service (do this after editing settings) |
 | `sudo display logs` | Shows the last 30 log lines, which is the first stop when something's off |
 | `display help` | Shows the built-in help |
+
+Theme, language, sleep timer and rotation apply in about a second and are remembered across reboots.
+
+**TAB completion:** type `display ` (or `sudo display `) and press **TAB** to see every command and
+theme. It also completes values, like `sudo display sleep <TAB>`. It works in any terminal opened after
+the install.
 
 ### Themes
 
@@ -192,7 +203,7 @@ Everything goes through the `display` command:
 | `halloween` | Moonlit graveyard, bats, fog, flickering jack-o'-lanterns, a ghost |
 | `christmas` | Falling snow (some flakes land in front of the eyes!), a tree with chasing lights, a waving snowman, a sleigh |
 | `cyberpunk` | A rainy neon city, wet-street reflections, hover cars, an ad blimp showing your server's name, random glitches |
-| `win95` | Teal desktop with beveled windows. The monster lives in `MONSTER.EXE`, its eyes follow the mouse cursor, error popups appear, and a starfield screensaver kicks in when it sleeps. |
+| `win95` | Teal desktop with beveled windows. The monster lives in `MONSTER.EXE`, its eyes follow the mouse cursor, and funny error popups show up (the cursor goes and clicks OK). |
 
 > There's also one hidden theme. Hint: it's a four-letter classic shooter. Typing its name a second time gets you out.
 
@@ -200,7 +211,9 @@ Everything goes through the `display` command:
 
 ## Configuration
 
-The settings live in `/etc/nowplaying/nowplaying.env`. Edit them with:
+Most people never need this section: the theme, language, sleep timer and rotation are all set with the
+`display` command (see [Usage](#usage)). The connection settings and a few extras live in
+`/etc/nowplaying/nowplaying.env`. Edit them with:
 
 ```bash
 sudo nano /etc/nowplaying/nowplaying.env
@@ -213,8 +226,8 @@ sudo display restart
 | `JELLYFIN_API_KEY` | *(required)* | The key from the install steps |
 | `NP_LANG` | `en` | `en` or `pt` (`display lang` overrides it) |
 | `NP_THEME` | `pico` | Theme used before `display` is ever run |
-| `NP_ROTATE` | `0` | `180` if the image is upside down (`90`/`270` also work) |
-| `NP_SLEEP_MIN` | `10` | Minutes idle before the monster falls asleep |
+| `NP_ROTATE` | `0` | Starting rotation (`display rotate` overrides it) |
+| `NP_SLEEP_MIN` | `240` | Starting sleep timer in minutes, `0` = never (`display sleep` overrides it) |
 | `NP_FPS` | `6` | Frames per second. Only raise it if you also raise the SPI speed (see below). |
 | `NP_PIXEL_POSTER` | *(off)* | Set to `1` for a crunchy 8-bit poster in the theme's palette |
 | `FB_DEVICE` | *(auto)* | Force a framebuffer, e.g. `/dev/fb1` |
@@ -267,7 +280,9 @@ curl http://127.0.0.1:8096/System/Info/Public     # should print some JSON with 
 <details>
 <summary><b>The image is upside down</b></summary>
 
-Add `NP_ROTATE=180` to `/etc/nowplaying/nowplaying.env` and run `sudo display restart`.
+```bash
+sudo display rotate 180
+```
 
 </details>
 
@@ -302,9 +317,23 @@ sudo sed -i 's/\r$//' /opt/nowplaying/display
 </details>
 
 <details>
+<summary><b>TAB doesn't complete the <code>display</code> command</b></summary>
+
+Completion loads when a terminal starts, so open a new one (or log out and back in over SSH). If it still
+doesn't work, make sure `bash-completion` is installed and that you're using bash:
+
+```bash
+sudo apt install bash-completion
+echo $SHELL      # should end in /bash
+```
+
+</details>
+
+<details>
 <summary><b>I changed a file and nothing happened</b></summary>
 
-`display <theme>` applies instantly, but **code and settings are only read when the service starts**. Run `sudo display restart`.
+Everything set with `display` (theme, language, sleep, rotation) applies instantly, but **code and the
+`nowplaying.env` file are only read when the service starts**. Run `sudo display restart`.
 
 </details>
 
@@ -359,14 +388,15 @@ sudo bash /opt/nowplaying/uninstall.sh
 ### Project layout
 
 ```
-nowplaying.py        the app: Jellyfin polling, every screen, theme scene and the monster
-themes.py            all the color palettes (no heavy imports, so `display` stays fast)
-display              the CLI
-nowplaying.service   hardened systemd unit
-install.sh           one-command installer
-uninstall.sh         removes everything
-tools/               make_screenshots.py, which renders every image in this README
-docs/screenshots/    said images
+nowplaying.py            the app: Jellyfin polling, every screen, theme scene and the monster
+themes.py                all the color palettes (no heavy imports, so `display` stays fast)
+display                  the CLI
+display-completion.bash  TAB completion for it
+nowplaying.service       hardened systemd unit
+install.sh               one-command installer
+uninstall.sh             removes everything
+tools/                   make_screenshots.py, which renders every image in this README
+docs/screenshots/        said images
 ```
 
 ---

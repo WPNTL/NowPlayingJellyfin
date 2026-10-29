@@ -28,7 +28,8 @@ yes_no "Continue?" "N" || { echo "ok, nothing touched."; exit 0; }
 if [ "$SKIP_SYSTEM" != "1" ]; then
   systemctl disable --now nowplaying >/dev/null 2>&1 || true
 fi
-rm -f "$DESTDIR/etc/systemd/system/nowplaying.service" "$DESTDIR/usr/local/bin/display"
+rm -f "$DESTDIR/etc/systemd/system/nowplaying.service" "$DESTDIR/usr/local/bin/display" \
+      "$DESTDIR/usr/share/bash-completion/completions/display"
 rm -rf "$DESTDIR/etc/nowplaying" "$DESTDIR/var/lib/nowplaying"
 if [ "$SKIP_SYSTEM" != "1" ]; then
   systemctl daemon-reload

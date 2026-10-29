@@ -14,7 +14,9 @@ env vars (the installer puts these in /etc/nowplaying/nowplaying.env):
   JELLYFIN_API_KEY  required (dashboard > api keys)
   FB_DEVICE         auto-detects the ili9486 fb, falls back to /dev/fb1
   NP_ROTATE         0/90/180/270 if the image comes out upside down
-  NP_SLEEP_MIN      mins idle before the monster falls asleep (default 10)
+  NP_SLEEP_MIN      mins idle before the monster gets drowsy (default 240 = 4h, 0 = never)
+                    ^ both of these are easier w/ `display rotate` / `display sleep` now,
+                      and those win over the env vars (same deal as theme + lang)
   NP_THEME          theme to use if `display` was never run (default pico)
   NP_LANG           on-screen text language, en or pt (default en). `display lang` wins over this
   NP_STATE          where the current theme is saved (default /var/lib/nowplaying/state.json)
@@ -44,14 +46,20 @@ from themes import THEMES, DEFAULT_THEME, STATE_PATH, hx, load_state, resolve
 # os.environ["SDL_FBDEV"] = "/dev/fb1"
 # os.environ["SDL_VIDEODRIVER"] = "fbcon"
 
-__version__ = "1.0"   # 1.0 lets gooo (win95 update)
+__version__ = "1.1"   # drowsy eyes + display sleep/rotate + tab completion
 
 # ---------------------------------------------------------------- config ----
 # JF_URL = os.environ.get("JELLYFIN_URL", "http://127.0.0.1:8097").rstrip("/")   # my box runs on 8097, oops
 JF_URL = os.environ.get("JELLYFIN_URL", "http://127.0.0.1:8096").rstrip("/")
 JF_KEY = os.environ.get("JELLYFIN_API_KEY", "")
-ROTATE = int(os.environ.get("NP_ROTATE", "0"))
-SLEEP_AFTER = float(os.environ.get("NP_SLEEP_MIN", "10")) * 60
+# ROTATE + SLEEP_AFTER get overwritten by apply_settings() whenever `display` changes them,
+# these env ones are just the fallback
+ROTATE_ENV = int(os.environ.get("NP_ROTATE", "0"))
+# SLEEP_AFTER = float(os.environ.get("NP_SLEEP_MIN", "10")) * 60
+# ^ 10 min was way too soon, it spent most of the day w/ its eyes shut. 4h now
+SLEEP_MIN_ENV = float(os.environ.get("NP_SLEEP_MIN", "240"))
+ROTATE = ROTATE_ENV
+SLEEP_AFTER = SLEEP_MIN_ENV * 60 if SLEEP_MIN_ENV > 0 else float("inf")
 POLL_SEC = 2.0
 # spi @ 16mhz tops out ~6.5 full frames/s, don't get greedy.
 # if u bump the overlay to speed=32000000 u can try NP_FPS=10, smoother road
@@ -101,6 +109,31 @@ STRINGS = {
 def tr(key):
     v = STRINGS[key]
     return v.get(LANG, v["en"])
+
+
+def fmt_mins(m):
+    """240 -> 4h, 90 -> 1h30m, 0 -> off. just for the logs"""
+    if not m or m <= 0:
+        return "off"
+    h, mm = divmod(int(round(m)), 60)
+    return (f"{h}h" if h else "") + (f"{mm}m" if mm or not h else "")
+
+
+def apply_settings(st):
+    """sleep timer + rotation from the state file (`display sleep 4h`, `display rotate 180`).
+    gets called every time the file changes, so both apply live, no restart.
+    returns (sleep mins, rotate) so the caller can log it"""
+    global SLEEP_AFTER, ROTATE
+    try:
+        mins = float(st.get("sleep_min", SLEEP_MIN_ENV))
+    except (TypeError, ValueError):
+        mins = SLEEP_MIN_ENV   # someone hand-edited the json and typo'd, whatever
+    SLEEP_AFTER = mins * 60 if mins > 0 else float("inf")   # 0 = never gets drowsy
+    try:
+        ROTATE = int(st.get("rotate", ROTATE_ENV)) % 360
+    except (TypeError, ValueError):
+        ROTATE = ROTATE_ENV
+    return mins, ROTATE
 
 
 def pick_lang(v):
@@ -153,6 +186,7 @@ class ThemeWatch:
         self.forced = forced
         self.mtime = self._mtime()
         name, LANG = self._read()
+        self.settings = apply_settings(load_state())
         self.T = Theme(forced or name)
         self.next_check = 0
 
@@ -178,6 +212,10 @@ class ThemeWatch:
             m = self._mtime()
             if m != self.mtime:
                 self.mtime = m
+                s = apply_settings(load_state())
+                if s != self.settings:
+                    print(f"[settings] sleep={fmt_mins(s[0])} rotate={s[1]}", flush=True)
+                    self.settings = s
                 name, lang = self._read()
                 if name != self.T.name or lang != LANG:
                     print(f"[theme] {self.T.name}/{LANG} -> {name}/{lang}", flush=True)
@@ -1486,7 +1524,7 @@ class Desktop:
     """win95-ish bg. teal desktop w/ icons, the monster living inside a MONSTER.EXE window,
     taskbar w/ the clock in the tray, a mouse cursor wandering around (the eyes FOLLOW it,
     fav detail of the whole project ngl), random error popups the cursor goes and clicks
-    away, and a starfield screensaver once the monster dozes off.
+    away. (there was a starfield screensaver too, retired in 1.1, see draw_bg)
     no logos, no real branding, just the vibe"""
 
     # WIN = (44, 16, 196, 128)   # brows were poking thru the menu bar, gave it more headroom
@@ -1602,7 +1640,10 @@ class Desktop:
     def draw_bg(self, img, t, T, playing=False, emit=None):
         dt = 0.0 if self.last_t is None else min(0.5, max(0.0, t - self.last_t))
         self.last_t, self.dt = t, dt
-        self.saver = not playing and self.idle_for > SLEEP_AFTER
+        # starfield screensaver used to kick in here once the monster fell asleep. retired it,
+        # the whole point is seeing the eyes. code's still below, too fun to delete
+        # self.saver = not playing and self.idle_for > SLEEP_AFTER
+        self.saver = False
         if self.saver:
             self._starfield(img, t, dt, T)
             return
@@ -1830,13 +1871,16 @@ EXPRS = {
                        dur=(1.8, 2.2), weight=1.5),
     "crosseyed":  dict(pupil=0.85, look="cross", props=("blush",), blink=False,
                        dur=(1.5, 2.5), weight=1),
-    "asleep":     dict(lid_top=1.0, look="down", props=("zzz",), bob="slow", blink=False),
+    # "asleep" was eyes shut + a big ZZZ. problem is it stayed like that for HOURS and the
+    # screen just looked dead. so now it's drowsy: half-lidded, nods off, jolts back awake
+    # "asleep":     dict(lid_top=1.0, look="down", props=("zzz",), bob="slow", blink=False),
+    "drowsy":     dict(lid_top=0.5, look="drift", bob="slow", blink_len=1.1),
 }
 
 
 class Monster:
     """the lil guy. random cartoon expressions every few secs + reacts to stuff:
-       movie ended -> sad, jellyfin down -> dizzy, boot -> surprised, idle long -> sleepy -> asleep"""
+       movie ended -> sad, jellyfin down -> dizzy, boot -> surprised, idle long -> sleepy -> drowsy"""
 
     EYES = ((82, -1), (158, 1))   # (center x, side). side -1 = left
 
@@ -1856,6 +1900,8 @@ class Monster:
         self.last_rand = None
         self.follow = None   # (x, y) to look at instead of wandering. win95 cursor sets this
         self.event = None    # (expression, until) pushed from outside, e.g. a popup showing up
+        self.nod_t0 = None   # drowsy nodding-off cycle, see _nod
+        self.next_nod = 0
         # self.forced = os.environ.get("NP_FACE")   # handy for testing one face at a time
 
     # ---- what face are we making
@@ -1865,8 +1911,9 @@ class Monster:
         if since_stop < 5:
             return "sad"                        # aww the movie's over
         if idle_for > SLEEP_AFTER:
-            return "asleep"
-        if idle_for > SLEEP_AFTER - 30:
+            return "drowsy"                     # been ages. fighting to keep its eyes open
+        # last minute before that it gets sleepy. min() so a tiny `display sleep 2m` still works
+        if idle_for > SLEEP_AFTER - min(60, SLEEP_AFTER / 4):
             return "sleepy"
         if self.event and now < self.event[1]:
             return self.event[0]
@@ -1915,6 +1962,8 @@ class Monster:
             tgt = [(sx, 9), (sx, 9)]
         elif mode == "up":
             tgt = [(3, -10), (3, -10)]
+        elif mode == "drift":         # drowsy: slooow lazy wander, mostly down
+            tgt = [(6 * math.sin(now * 0.31), 7 + 2 * math.sin(now * 0.23))] * 2
         elif mode == "scan":          # side to side, very sus
             sx = 10 * math.sin(now * 1.8)
             tgt = [(sx, 2), (sx, 2)]
@@ -2097,27 +2146,54 @@ class Monster:
                     text(d, 190 + int(ph * 30) + i * 4, 40 - int(ph * 30), "Z",
                          T.zzz if ph < 0.7 else T.dim, 1 + (i == 2))
 
+    def _nod(self, now):
+        """drowsy only. every 20-45s the lids slowly droop allll the way down, it's out for a
+        sec... then snaps wide open like it got caught napping in class.
+        returns (lid target, head dip) while it's happening, None otherwise"""
+        if self.nod_t0 is None:
+            if not self.next_nod:
+                self.next_nod = now + random.uniform(8, 15)
+            if now < self.next_nod:
+                return None
+            self.nod_t0 = now
+        p = now - self.nod_t0
+        if p < 3.0:                     # droooop
+            return 0.5 + 0.5 * (p / 3.0), int(p * 1.3)
+        if p < 4.5:                     # gone
+            return 1.0, 4
+        if p < 5.2:                     # !! huh?? i'm up i'm up
+            return 0.05, -3
+        self.nod_t0 = None
+        self.next_nod = now + random.uniform(20, 45)
+        return None
+
     def draw(self, d, t, idle_for, since_stop, err, T):
         now = time.time()
         name = self._mood(now, idle_for, since_stop, err)
         # if self.forced: name = self.forced
         if name != self.name:
             self.name, self.expr_t0 = name, now
+            self.nod_t0, self.next_nod = None, 0   # fresh nod timer next time it gets drowsy
         spec = EXPRS[name]
+        nod = self._nod(now) if name == "drowsy" else None
 
         # ease the numbers toward the target face
         for i in (0, 1):
             for key, dflt in FACE_DEFAULTS.items():
                 tgt = self._per_eye(spec.get(key, dflt), i)
-                if name == "asleep" and key == "lid_top" and int(t / 6) % 5 == 0:
-                    tgt = 0.55               # peeks every ~30s
+                # if name == "asleep" and key == "lid_top" and int(t / 6) % 5 == 0:
+                #     tgt = 0.55               # peeks every ~30s
+                if nod and key == "lid_top":
+                    tgt = nod[0]
+                    if tgt < 0.2:   # the jolt has to SNAP open, easing it made it look like a yawn
+                        self.cur[i][key] = tgt
                 self.cur[i][key] += (tgt - self.cur[i][key]) * (0.6 if key == "brow" else 0.45)
 
         self._pupils(now, spec)
 
-        # blink (most faces)
+        # blink (most faces). not mid-nod tho, a blink in the middle of that looked glitchy
         blink = 0.0
-        if spec.get("blink", True):
+        if spec.get("blink", True) and not nod:
             if now > self.next_blink and self.blink_t < 0:
                 self.blink_t = now
             if self.blink_t >= 0:
@@ -2130,6 +2206,8 @@ class Monster:
                     blink = 1 - abs(p * 2 - 1)
 
         bx, by = self._bob(t, spec.get("bob"))
+        if nod:
+            by += nod[1]   # head dips as it nods off, lil hop when it jolts awake
         for i, (ex, side) in enumerate(self.EYES):
             k = self.cur[i]
             kind = self._per_eye(spec.get("kind", "open"), i)
@@ -2139,12 +2217,14 @@ class Monster:
         self._props(d, t, spec.get("props", ()), bx, by, T)
 
         if not err:
-            asleep = name == "asleep"
-            msg = "ZZZ..." if asleep else T.idle
-            dots = not asleep and T.raw.get("idle_dots", True)
+            # asleep = name == "asleep"
+            # msg = "ZZZ..." if asleep else T.idle
+            drowsy = name == "drowsy"
+            msg = T.idle
+            dots = not drowsy and T.raw.get("idle_dots", True)
             s = msg + ("." * (int(t * 2) % 4) if dots else "")
-            col = T.dim if asleep else T.idle_txt
-            cols = None if asleep else T.raw.get("idle_colors")
+            col = T.dim if drowsy else T.idle_txt        # text dims down too, it's chill time
+            cols = None if drowsy else T.raw.get("idle_colors")
             if T.fx == "road":
                 text(d, 4, 2, s, col)   # bottom half is all road, so up top it goes
             elif T.raw.get("idle_xy"):
@@ -2397,7 +2477,7 @@ def render(state, faces, t, T):
     idle_for = 0.0 if now else time.time() - idle_since
     if bg and hasattr(bg, "server"):   # the blimp ad wants the server name. hacky but eh
         bg.server = state.server_name or "JELLYFIN"
-    if bg and hasattr(bg, "idle_for"):   # desktop needs it to know when to start the screensaver
+    if bg and hasattr(bg, "idle_for"):   # desktop used it for the (retired) screensaver
         bg.idle_for = idle_for
     if bg:
         emit = None
@@ -2409,7 +2489,7 @@ def render(state, faces, t, T):
     else:
         if T.face == "demon":
             faces["demon"].draw(d, img, t, idle_for, time.time() - stopped_at, err, T)
-        elif not getattr(bg, "saver", False):   # screensaver on = no monster, it's asleep anyway
+        elif not getattr(bg, "saver", False):   # screensaver's retired, so this is always true now
             if T.fx == "road":
                 fx_road(d, t, T)
             mon = faces["monster"]
@@ -2466,7 +2546,8 @@ def main():
              "aquarium": Aquarium(), "graveyard": Graveyard(), "snow": Snowscape(), "city": City(),
              "desktop": Desktop()}
     t0 = time.time()
-    print(f"[np] v{__version__} theme={themes.T.name} state={STATE_PATH}", flush=True)
+    print(f"[np] v{__version__} theme={themes.T.name} lang={LANG} sleep={fmt_mins(themes.settings[0])} "
+          f"rotate={themes.settings[1]} state={STATE_PATH}", flush=True)
 
     if preview:
         os.makedirs(preview, exist_ok=True)

@@ -7,7 +7,7 @@
 #
 # what it does (asks before anything important):
 #   1. installs python3 + pillow + numpy from apt
-#   2. copies the app to /opt/nowplaying, adds the `display` command
+#   2. copies the app to /opt/nowplaying, adds the `display` command (w/ TAB completion)
 #   3. sets up the 3.5" lcd driver in config.txt (backs it up first)
 #   4. asks for ur jellyfin url + api key, tests them, saves em root-only
 #   5. creates an unprivileged `nowplaying` user + a hardened systemd service
@@ -20,7 +20,7 @@
 set -euo pipefail
 
 REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/WPNTL/NowPlayingJellyfin/main}"
-FILES=(nowplaying.py themes.py display nowplaying.service uninstall.sh)
+FILES=(nowplaying.py themes.py display display-completion.bash nowplaying.service uninstall.sh)
 
 # DESTDIR + SKIP_SYSTEM=1 let me test this whole thing on a laptop w/o wrecking it.
 # u don't need these
@@ -31,6 +31,7 @@ CONF_DIR="$DESTDIR/etc/nowplaying"
 ENV_FILE="$CONF_DIR/nowplaying.env"
 UNIT_FILE="$DESTDIR/etc/systemd/system/nowplaying.service"
 BIN_LINK="$DESTDIR/usr/local/bin/display"
+COMPLETION="$DESTDIR/usr/share/bash-completion/completions/display"
 MARK_BEGIN="# >>> nowplaying lcd >>>"
 MARK_END="# <<< nowplaying lcd <<<"
 
@@ -117,9 +118,10 @@ step "1/5  Installing dependencies"
 if [ "$SKIP_SYSTEM" != "1" ]; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
-  apt-get install -y -qq python3 python3-pil python3-numpy curl >/dev/null
+  # bash-completion = TAB for the display command. tiny, and dietpi doesn't ship it
+  apt-get install -y -qq python3 python3-pil python3-numpy curl bash-completion >/dev/null
 fi
-ok "python3, pillow, numpy"
+ok "python3, pillow, numpy, bash-completion"
 
 # ------------------------------------------------------------------ 2. app --
 step "2/5  Installing the app to /opt/nowplaying"
@@ -138,11 +140,13 @@ else
   ok "downloaded from GitHub"
 fi
 # windows editors love sneaking \r in, which breaks the shebang. strip just in case
-sed -i 's/\r$//' "$APP_DIR"/*.py "$APP_DIR/display" "$APP_DIR/uninstall.sh"
+sed -i 's/\r$//' "$APP_DIR"/*.py "$APP_DIR"/*.bash "$APP_DIR/display" "$APP_DIR/uninstall.sh"
 chmod 0755 "$APP_DIR/display" "$APP_DIR/uninstall.sh"
 mkdir -p "$(dirname "$BIN_LINK")"
 ln -sf /opt/nowplaying/display "$BIN_LINK"
-ok "\`display\` command ready"
+mkdir -p "$(dirname "$COMPLETION")"
+install -m 0644 "$APP_DIR/display-completion.bash" "$COMPLETION"
+ok "\`display\` command ready (TAB completes it in new terminals)"
 
 # ------------------------------------------------------------------ 3. lcd --
 step "3/5  Screen driver (3.5\" ILI9486 SPI LCD)"
@@ -254,8 +258,8 @@ if [ "$KEEP" = "0" ]; then
       echo "JELLYFIN_URL=$URL"
       echo "JELLYFIN_API_KEY=$KEY"
       echo "NP_LANG=$LANG_"
-      echo "# NP_ROTATE=180        # image upside down?"
-      echo "# NP_SLEEP_MIN=10      # minutes idle before the monster falls asleep"
+      echo "# theme, lang, sleep timer and rotation are easier w/ the display command:"
+      echo "#   sudo display sleep 4h   /   sudo display rotate 180   /   display help"
       echo "# NP_FPS=6             # only raise this if u also raise the SPI speed"
       echo "# NP_PIXEL_POSTER=1    # crunchy 8-bit poster instead of the full-res one"
     } > "$ENV_FILE"
@@ -292,7 +296,9 @@ say ""
 say "  Try these:"
 say "    display list            ${C}# see all the themes${N}"
 say "    sudo display miami      ${C}# switch theme${N}"
+say "    sudo display sleep 4h   ${C}# how long before the monster gets drowsy${N}"
 say "    sudo display logs       ${C}# if something looks off${N}"
+say "  (TAB completion kicks in once u open a new terminal)"
 say ""
 if [ "$REBOOT" = "1" ] && [ "$SKIP_SYSTEM" != "1" ]; then
   # no terminal (some automation) and nobody said ASSUME_YES -> never reboot on our own

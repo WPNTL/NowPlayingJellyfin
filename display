@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""
+display - lil cli to boss the now playing lcd around
+
+  display              what's on rn
+  display list         list themes (w/ color swatches if ur terminal does truecolor)
+  display <theme>      switch it, e.g. `display miami`. case doesn't matter
+  display lang <xx>    on-screen text language: en, pt
+  display restart      kick the service (do this after updating files)
+  display logs         last 30 lines of the service log
+  display help         this
+
+changing theme/lang needs root (sudo), the state file lives in /var/lib.
+the daemon checks it every ~1s, so changes show up basically instantly.
+"""
+import os
+import subprocess
+import sys
+
+# resolve the symlink in /usr/local/bin so we find themes.py next to the real file
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from themes import THEMES, DEFAULT_THEME, STATE_PATH, hx, load_state, save_state, resolve  # noqa: E402
+
+SERVICE = "nowplaying"
+LANGS = {"en": "english", "pt": "portugues"}
+COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+
+
+def swatch(hexes):
+    if not COLOR:
+        return ""
+    out = ""
+    for h in hexes:
+        r, g, b = hx(h)
+        out += f"\033[48;2;{r};{g};{b}m  "
+    return out + "\033[0m"
+
+
+def current():
+    return resolve(load_state().get("theme", os.environ.get("NP_THEME", DEFAULT_THEME)))
+
+
+def current_lang():
+    return load_state().get("lang") or os.environ.get("NP_LANG", "en")
+
+
+def service_up():
+    try:
+        r = subprocess.run(["systemctl", "is-active", "--quiet", SERVICE],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return r.returncode == 0
+    except FileNotFoundError:
+        return True   # no systemd?? whatever, don't nag
+
+
+def list_themes():
+    cur = current()
+    for name, th in THEMES.items():
+        if th.get("hidden"):
+            continue   # nothing to see here
+        mark = "*" if name == cur else " "
+        # print(f" {mark} {name:<7} ...")   # 7 was fine til "halloween" showed up
+        print(f" {mark} {name:<10} {swatch(th['swatch'])}  {th['desc']}")
+    if cur == "doom":
+        print(" * ???        (you know what you did)")
+
+
+def set_theme(name):
+    st = load_state()
+    cur = resolve(st.get("theme", DEFAULT_THEME))
+
+    if name == "doom":
+        if cur == "doom":   # toggle off -> back to whatever was on before
+            back = resolve(st.get("prev")) or DEFAULT_THEME
+            st.update(theme=back, prev="doom")
+            save_state(st)
+            print(f"phew. back to {back}.")
+        else:
+            st.update(theme="doom", prev=cur)
+            save_state(st)
+            print("...you shouldn't have done that  >:)")
+            print("(`display doom` again to get out)")
+        return
+
+    if name == cur:
+        print(f"already on {name} lol")
+        return
+    # save_state({"theme": name, "prev": cur})   # this nuked the lang setting, oops
+    st.update(theme=name, prev=cur)
+    save_state(st)
+    print(f"theme: {cur} -> {name}  {swatch(THEMES[name]['swatch'])}")
+
+
+def set_lang(args):
+    if len(args) < 2 or args[1] not in LANGS:
+        opts = ", ".join(f"{k} ({v})" for k, v in LANGS.items())
+        print(f"lang: {current_lang()}   options: {opts}")
+        print("usage: sudo display lang pt")
+        return
+    st = load_state()
+    st["lang"] = args[1]
+    save_state(st)
+    print(f"lang -> {args[1]}")
+
+
+def main():
+    args = [a.lower() for a in sys.argv[1:]]
+
+    if not args:
+        cur = current()
+        th = THEMES.get(cur, THEMES[DEFAULT_THEME])
+        shown = "???" if th.get("hidden") else cur
+        print(f"theme: {shown}  {swatch(th['swatch'])}   lang: {current_lang()}")
+        if not service_up():
+            print(f"heads up: {SERVICE} isn't running -> sudo systemctl start {SERVICE}")
+        return
+
+    cmd = args[0]
+    if cmd in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return
+    if cmd in ("list", "ls", "themes"):
+        list_themes()
+        return
+    if cmd == "restart":
+        os.execvp("systemctl", ["systemctl", "restart", SERVICE])
+    if cmd in ("logs", "log"):
+        os.execvp("journalctl", ["journalctl", "-u", SERVICE, "-n", "30", "--no-pager"])
+    # TODO: `display off`. backlight is hardwired on this cheap board tho, so best
+    # we could do is draw black and stop updating. meh, someday
+    # if cmd == "off":
+    #     save_state({**load_state(), "off": True})
+    #     return
+
+    try:
+        if cmd == "lang":
+            set_lang(args)
+            return
+        cmd = resolve(cmd)   # old names still work, quietly
+        if cmd not in THEMES:
+            print(f"no theme called '{cmd}' :/  try `display list`")
+            sys.exit(1)
+        set_theme(cmd)
+    except PermissionError:
+        print(f"can't write {STATE_PATH}, gotta be root -> sudo display {' '.join(args)}")
+        sys.exit(1)
+    if not service_up():
+        print(f"heads up: {SERVICE} isn't running -> sudo systemctl start {SERVICE}")
+
+
+if __name__ == "__main__":
+    main()

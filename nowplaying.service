@@ -1,0 +1,46 @@
+[Unit]
+Description=Jellyfin Now Playing LCD
+Documentation=https://github.com/WPNTL/NowPlayingJellyfin
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# own unprivileged user. only extra thing it gets is the video group (that's what /dev/fb1 needs)
+User=nowplaying
+Group=nowplaying
+SupplementaryGroups=video
+# api key lives in here, chmod 600 root-only. systemd reads it before dropping to the user above
+EnvironmentFile=/etc/nowplaying/nowplaying.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /opt/nowplaying/nowplaying.py
+Restart=always
+RestartSec=5
+Nice=10
+# /var/lib/nowplaying (the `display` cli writes the theme there)
+StateDirectory=nowplaying
+StateDirectoryMode=0755
+
+# hardening. it just reads an http api and writes pixels to a framebuffer,
+# it doesn't need to touch anything else on the box
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

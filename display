@@ -10,6 +10,8 @@ display - lil cli to boss the now playing lcd around
                            e.g. 30m, 2h, 1h30m, 4h (default), off = never
   display rotate <deg>     0, 90, 180 or 270. 180 if the image is upside down
   display restart          kick the service (do this after updating files)
+  display kill             stop it (frees the cpu) + blank the screen. stays off after reboot
+  display start            bring it back (and on at boot again)
   display logs             last 30 lines of the service log
   display help             this
 
@@ -31,7 +33,7 @@ ENV_FILE = "/etc/nowplaying/nowplaying.env"
 LANGS = {"en": "english", "pt": "portugues"}
 ROTATIONS = ("0", "90", "180", "270")
 SLEEP_PRESETS = ("30m", "1h", "2h", "4h", "8h", "12h", "off")
-COMMANDS = ("list", "lang", "sleep", "rotate", "restart", "logs", "help")
+COMMANDS = ("list", "lang", "sleep", "rotate", "restart", "kill", "start", "logs", "help")
 COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
 
 
@@ -217,6 +219,54 @@ def set_rotate(args):
     print(f"rotate -> {args[1]}")
 
 
+def find_fb():
+    """same detection as nowplaying.py. copy pasted bc importing it pulls in numpy (slow)"""
+    base = "/sys/class/graphics"
+    for name in sorted(os.listdir(base)) if os.path.isdir(base) else []:
+        try:
+            with open(f"{base}/{name}/name") as f:
+                if any(k in f.read().lower() for k in ("ili9486", "fb_ili", "fbtft", "waveshare", "piscreen")):
+                    return f"/dev/{name}"
+        except OSError:
+            pass
+    return None
+
+
+def blank_screen():
+    """the lcd keeps showing the last frame after the process dies (it's just memory),
+    so a frozen monster stares at u forever. write zeros = black. backlight's hardwired
+    on these boards so true off isn't possible, black is the best we get"""
+    fb = os.environ.get("FB_DEVICE") or find_fb()
+    if not fb:
+        return
+    try:
+        with open(fb, "r+b", buffering=0) as f:
+            f.write(b"\0" * (4 * 1024 * 1024))   # way more than 480x320, stops at the end
+    except OSError:
+        pass   # "no space left" at the end is expected, anything else meh
+
+
+def kill():
+    # stop + disable so it doesn't sneak back on the next reboot. `display start` undoes it
+    r = subprocess.run(["systemctl", "disable", "--now", SERVICE],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    if r.returncode != 0:
+        print(f"couldn't stop it: {r.stderr.strip() or 'need root?'}  -> sudo display kill")
+        sys.exit(1)
+    blank_screen()
+    print("stopped. screen's blank, cpu's free, won't start on boot.")
+    print("bring it back w/ `sudo display start`")
+
+
+def start():
+    r = subprocess.run(["systemctl", "enable", "--now", SERVICE],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    if r.returncode != 0:
+        print(f"couldn't start it: {r.stderr.strip() or 'need root?'}  -> sudo display start")
+        sys.exit(1)
+    print("running again. say hi to the monster")
+
+
 def complete(words):
     """for tab completion. `display __complete <words typed so far>` prints what could come
     next, the bash completion script calls this. asking the cli itself means custom themes
@@ -238,7 +288,7 @@ def main():
     if not args:
         show_all()
         if not service_up():
-            print(f"heads up: {SERVICE} isn't running -> sudo systemctl start {SERVICE}")
+            print(f"heads up: {SERVICE} isn't running -> sudo display start")
         return
 
     cmd = args[0]
@@ -247,6 +297,12 @@ def main():
         return
     if cmd in ("list", "ls", "themes"):
         list_themes()
+        return
+    if cmd in ("kill", "stop", "off"):
+        kill()
+        return
+    if cmd in ("start", "on"):
+        start()
         return
     if cmd == "restart":
         os.execvp("systemctl", ["systemctl", "restart", SERVICE])
@@ -277,7 +333,7 @@ def main():
         print(f"can't write {STATE_PATH}, gotta be root -> sudo display {' '.join(args)}")
         sys.exit(1)
     if not service_up():
-        print(f"heads up: {SERVICE} isn't running -> sudo systemctl start {SERVICE}")
+        print(f"heads up: {SERVICE} isn't running -> sudo display start")
 
 
 if __name__ == "__main__":

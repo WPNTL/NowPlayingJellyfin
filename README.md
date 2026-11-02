@@ -181,6 +181,8 @@ Everything goes through the `display` command:
 | `sudo display lang en` / `pt` | Switches the on-screen language |
 | `sudo display sleep <time>` | How long with nothing playing before the monster gets drowsy. Default `4h`. Examples: `30m`, `2h`, `1h30m`, `off` (never). |
 | `sudo display rotate <deg>` | Rotates the image: `0`, `90`, `180` or `270`. Use `180` if it's upside down. |
+| `sudo display kill` | Stops it completely, frees the CPU and blanks the screen. Stays off after reboots. |
+| `sudo display start` | Turns it back on (and on at boot again) |
 | `sudo display restart` | Restarts the service (do this after editing settings) |
 | `sudo display logs` | Shows the last 30 log lines, which is the first stop when something's off |
 | `display help` | Shows the built-in help |
